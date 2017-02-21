@@ -1,4 +1,4 @@
-
+//References used: UNIX Programming Textbook AND several youtube videos (can provide list and urls if necessary)
 
 #include <stdlib.h>
 #include <stdio.h>
