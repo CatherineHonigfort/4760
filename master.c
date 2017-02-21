@@ -6,28 +6,29 @@
 #include <signal.h>
 #include <sys/shm.h>
 
-/*getopt() flags:*/
+//getopt() from before -- flags:
 static int h_flag = 0;
-static int maxSlaveProcessesSpawned = 5; //user sets a maximum for the number of slave processes spawned with '-s x' flag where x sets maxSlaveProcessesSpawned
-static char* fileName = "test.out"; //declaring char* fileName character pointer as a const string affords us the priviledge of not having to end our string with a NULL terminator '\0'
-static int criticalRegionEntranceAllowance = 3; //the default number of times each slave/child process is allowed to enter its critical region to increment the sharedNum variable and write
-static int computationShotClock = 20;
-/*getopt() flags:*/
+static int maxSlaveSpawned = 5; //-s x flag sets maximum number of the slaves spawned
+static char* fileName = "testdata.out"; //chose char because then NULL character isn't necessary
+static int criticalRegionEntranceAllowance = 3;
+static int computationClock = 20;
+
+
 
 pid_t *slavePointer;
-int shmid_sharedNum; //holds the shared memory segment id #global
+int shmem_id_sharedNum; //shared memory segment id
 int* sharedNum; //pointer to starting address in shared memory of the shared int variable #global
 key_t key_sharedNum = 9823; //a name for your shared memory segment
 
-int shmid_sharedNum2; //holds the shared memory segment id #global
-int* sharedNum2; //pointer to starting address in shared memory of an array of shared int variables #global
-key_t key_sharedNum2 = 9824; //a name for your shared memory segment
+int shmem_id_sharedNum2; //holds the shared memory segment id #global
+int* sharedNum2;
+key_t key_sharedMemSeg = 9824;
 
-//function detaches the shared memory segment shmaddr and then removes the shared memory segment specified by shmid
-int detachandremove (int shmid, void* shmaddr){
+
+int detachandremove (int shmid, void* shmem_addr){ //detaches the shared memory then removes the shared memory segment
     int error = 0;
 
-    if (shmdt(shmaddr) == - 1)
+    if (shmdt(shmem_addr) == - 1)
         error = errno;
     if ((shmctl(shmid, IPC_RMID, NULL) == -1) && !error)
         error = errno;
@@ -37,57 +38,55 @@ int detachandremove (int shmid, void* shmaddr){
     return -1;
 }
 
-//function that spawns slave processes
-void makeSlaveProcesses(int numberOfSlaves)
+
+void makeSlaveProcesses(int numberOfSlaves) //spawn slaves
 {
-    char slave_id[3];
+    char slave_id[3]; //3 was specified earlier
     int i, status;
 
-    //Allocate space for slave process array
-    slavePointer = (pid_t*) malloc(sizeof(pid_t) * maxSlaveProcessesSpawned);
 
-    // Fork loop
+    slavePointer = (pid_t*) malloc(sizeof(pid_t) * maxSlaveSpawned); //allocate slave arrays
+
+    // This is where the Fork loop happens
     for (i = 0; i < numberOfSlaves; i++)
     {
         slavePointer[i] = fork();
 
         if (slavePointer[i] < 0) {
-            //fork failed
-            perror("Fork failed");
+            perror("The fork failed"); // error check
             exit(errno);
         }
-        else if (slavePointer[i] == 0) {
-            //slave (child) process code - - remember that fork() returns twice...
+        else if (slavePointer[i] == 0) { // if fork doesn't fail, process
             sprintf(slave_id, "%d", i + 1);
             execl("./slave", "slave", slave_id, NULL);
-            perror("Child failed to execl slave exe");
-            printf("THIS WILL NEVER EXECUTE\n");
+            perror("The child process has failed");
+            printf("Will not execute\n");
         }
     }
 
-    //All slaves have been forked. Wait calling process waits (blocks/goes to sleep) for them to terminate (or change state i.e., terminate or get interrupted)
+    //Slaves have been forked. Wait  for them to terminate
     while(wait(&status) > 0) {
-        if (WIFEXITED(status))  /* process exited normally */
-                printf("slave process exited with value %d\n", WEXITSTATUS(status));
-        else if (WIFSIGNALED(status))   /* child exited on a signal */
-                printf("slave process exited due to signal %d\n", WTERMSIG(status));
-        else if (WIFSTOPPED(status))    /* child was stopped */
-                printf("slave process was stopped by signal %d\n", WIFSTOPPED(status));
+        if (WIFEXITED(status)) // normal exit
+                printf("slave process properly exited %d\n", WEXITSTATUS(status));
+        else if (WIFSIGNALED(status)) //child exited
+                printf("slave process exited by user %d\n", WTERMSIG(status));
+        else if (WIFSTOPPED(status))
+                printf("slave process was stopped by user %d\n", WIFSTOPPED(status));
     }
 
 }
 
-//master.c signal handler for master process
-void signalCallback (int signum)
+
+void signalCallback (int signum) //master process
 {
     int i, status;
 
     if (signum == SIGINT)
-        printf("\nSIGINT received by master\n");
+        printf("\n signal was received by the master\n");
     else
-        printf("\nSIGALRM received by master\n");
+        printf("\n signal alarm was received by the master\n");
 
-   for (i = 0; i < maxSlaveProcessesSpawned; i++){
+   for (i = 0; i < maxSlaveSpawned; i++){
         kill(slavePointer[i], SIGTERM);
     }
     while(wait(&status) > 0) {
@@ -118,7 +117,7 @@ int main(int argc, char* argv[])
                 h_flag = 1;
                 break;
             case 's':
-                maxSlaveProcessesSpawned = atoi(optarg);
+                maxSlaveSpawned = atoi(optarg);
                 break;
             case 'l':
                 fileName = optarg;
@@ -127,7 +126,7 @@ int main(int argc, char* argv[])
                 criticalRegionEntranceAllowance = atoi(optarg);
                 break;
             case 't':
-                computationShotClock = atoi(optarg);
+                computationClock = atoi(optarg);
                 break;
             case '?':
                 if (optopt == 's' || optopt == 'l' || optopt == 'i' || optopt == 't')
@@ -140,39 +139,39 @@ int main(int argc, char* argv[])
 
     if (h_flag == 1)
     {
-        printf("'-h' flag: This provides a help menu\n");
-        printf("'-s x' flag: This sets the number of slave processes spawned (default value = %d).  Current value = %d\n", maxSlaveProcessesSpawned,maxSlaveProcessesSpawned);
-        printf("'-l filename' flag: This sets the name of the file that the slave processes will write into (default file name = %s).  Current name  is %s\n", fileName, fileName);
-        printf("'-i y' flag: This sets the amount of times each slave should increment and write to the file (default value = %d). Current value = %d\n",criticalRegionEntranceAllowance, criticalRegionEntranceAllowance);
-        printf("'-t z' flag: This flag determines the amount time that will pass until the master process terminates itself (default value = %d). Current value of the timer variable = %d\n", computationShotClock, computationShotClock );
+        printf("'-h' flag: Help menu\n");
+        printf("'-s x' flag: Sets number of slave processes spawned -- default value = %d. -- Current value = %d\n", maxSlaveSpawned,maxSlaveSpawned);
+        printf("'-l filename' flag: Sets the name of file that the slave processes -- default file name = %s --  Current name  is %s\n", fileName, fileName);
+        printf("'-i y' flag: Sets the amount of times each slave increments and writes to file  --default value = %d --  Current value = %d\n",criticalRegionEntranceAllowance, criticalRegionEntranceAllowance);
+        printf("'-t z' flag: Amount of time until the master process terminates itself -- default value = %d == Current value of the timer variable = %d\n", computationClock, computationClock );
         exit(0);
     }
 
-    //generate SIGINT via Ctrl+c
+    //generate SIGINT -- Ctrl+c
     if (signal(SIGINT, signalCallback) == SIG_ERR) {
         perror("Error: master: signal(): SIGINT\n");
         exit(errno);
     }
-    //generate via alarm()
+    //generates alarm()
     if (signal(SIGALRM, signalCallback) == SIG_ERR) {
         perror("Error: slave: signal(): SIGALRM\n");
         exit(errno);
     }
 
-    //this timer generates SIGALRM after computationShotClock seconds
-    alarm(computationShotClock);
+    //Generates SIGALRM after computationClock seconds
+    alarm(computationClock);
 
-    //master process creates and assigns shared memory segment; assigns id to shmid_sharedNum
-    if ((shmid_sharedNum = shmget(key_sharedNum, sizeof(int), IPC_CREAT | 0600)) < 0) {
-        perror("Error: shmget");
+
+    if ((shmid_sharedNum = shmget(key_sharedNum, sizeof(int), IPC_CREAT | 0600)) < 0) { // master creates and assigns shared memory
+        perror("Error: shmem_get");
         exit(errno);
     }
 
-    //attach shared memory to sharedNum
+    //SharedNum attached to shared memory
     sharedNum = shmat(shmid_sharedNum, NULL, 0);
 
     //master process creates and assigns a second shared memory segment; assigns id to shmid_sharedNum2
-    if ((shmid_sharedNum2 = shmget(key_sharedNum2, sizeof(int) * (maxSlaveProcessesSpawned +1), IPC_CREAT | 0600)) < 0) {
+    if ((shmid_sharedNum2 = shmget(key_sharedMemSeg, sizeof(int) * (maxSlaveSpawned +1), IPC_CREAT | 0600)) < 0) {
         perror("Error: shmget");
         exit(errno);
     }
@@ -181,20 +180,20 @@ int main(int argc, char* argv[])
     sharedNum2 = shmat(shmid_sharedNum2, NULL, 0);
 
     //master initializes shared memory variable to number of spawn processes to create proper array size
-    *sharedNum = maxSlaveProcessesSpawned;
+    *sharedNum = maxSlaveSpawned;
 
     int i;
-    for(i = 0; i <= maxSlaveProcessesSpawned; i++) {
+    for(i = 0; i <= maxSlaveSpawned; i++) {
         sharedNum2[i] = i;
     }
 
     //spawn slave process
-    makeSlaveProcesses(maxSlaveProcessesSpawned);
+    makeSlaveProcesses(maxSlaveSpawned);
 
     sleep(5);
     printf("[master]: Done\n");
 
-    //Cleanup
+    //Cleanup shared memory allocated
     detachandremove(shmid_sharedNum,sharedNum);
     detachandremove(shmid_sharedNum2,sharedNum2);
     free(slavePointer);
