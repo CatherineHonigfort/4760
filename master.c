@@ -1,3 +1,5 @@
+//References used: UNIX Programming Textbook AND several youtube videos (can provide list and urls if necessary)
+
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
