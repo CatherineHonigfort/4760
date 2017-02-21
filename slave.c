@@ -10,22 +10,22 @@
 
 char slave_id[3];
 
-int shmid_sharedNum; //holds the shared memory segment id #global
-int* sharedNum; //pointer to starting address in shared memory of the shared int variable #global
-key_t key_sharedNum = 9823; //a name for your shared memory segment
+int sharedmemid_sharedNum; //Shared memory segment id #global
+int* sharedNum; //pointer to shared memory of #global
+key_t key_sharedNum = 9823; //shared memory segment
 
-int shmid_sharedNum2; //holds the shared memory segment id #global
-int* sharedNum2; //pointer to starting address in shared memory of an array of shared int variables #global
-key_t key_sharedNum2 = 9824; //a name for your shared memory segment
+int sharedmemid_sharedGlobal; //holds the shared memory segment id #global
+int* sharedGlobal; //pointer of shared int variables #global
+key_t key_sharedGlobal = 9824; //shared memory segment
 
-//slave.c signal handler for slave processes
+//slave process handler
 void signalCallback (int signum)
 {
-    printf("\nSIGTERM received by slave %d\n", atoi(slave_id));
+    printf("\nSIGTERM from slave %d\n", atoi(slave_id));
 
-    // Cleanup
+    // Cleanup the shared memory allocated
     shmdt(sharedNum);
-    shmdt(sharedNum2);
+    shmdt(sharedGlobal);
     exit(0);
 }
 
@@ -38,35 +38,35 @@ int main(int argc, char* argv[])
         exit(errno);
     }
 
-    //master process creates and assigns shared memory segment; assigns id to shmid_sharedNum
-    if ((shmid_sharedNum = shmget(key_sharedNum, sizeof(int), 0600)) < 0) {
-        perror("Error: shmget");
+    //master assigns shared memory segment
+    if ((sharedmemid_sharedNum = shmget(key_sharedNum, sizeof(int), 0600)) < 0) {
+        perror("Error: sharedmem_get");
         exit(errno);
     }
 
-    //attach shared memory
-    sharedNum = shmat(shmid_sharedNum, NULL, 0);
+    //attach the shared memory
+    sharedNum = shmat(sharedmemid_sharedNum, NULL, 0);
 
-    //master process creates and assigns a second shared memory segment; assigns id to shmid_sharedNum2
-    if ((shmid_sharedNum2 = shmget(key_sharedNum2, sizeof(int) * (*sharedNum +1), IPC_CREAT | 0600)) < 0) {
-        perror("Error: shmget");
+    //master process assigns second shared memory segment
+    if ((sharedmemid_sharedGlobal = shmget(key_sharedGlobal, sizeof(int) * (*sharedNum +1), IPC_CREAT | 0600)) < 0) {
+        perror("Error: sharedmem_get");
         exit(errno);
     }
 
-    //attach shared memory to sharedNum2
-    sharedNum2 = shmat(shmid_sharedNum2, NULL, 0);
+    //attach shared memory to sharedGlobal
+    sharedGlobal = shmat(sharedmemid_sharedGlobal, NULL, 0);
 
     int i;
     for(i = 0; i <= *sharedNum; i++) {
-        sharedNum2[i] = i;
+        sharedGlobal[i] = i;
     }
 
-    printf("%s %d array size = %d\n\tarray value = %d\n",argv[0], atoi(slave_id), *sharedNum, sharedNum2[atoi(slave_id)]);
+    printf("%s %d array size = %d\n\tarray value = %d\n",argv[0], atoi(slave_id), *sharedNum, sharedGlobal[atoi(slave_id)]);
 
     sleep(3);
 
-    //Clean up
+    //Clean up shared memory
     shmdt(sharedNum);
-    shmdt(sharedNum2);
+    shmdt(sharedGlobal);
     return 0;
 }
