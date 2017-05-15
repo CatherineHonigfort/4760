@@ -7,187 +7,40 @@
 #include <signal.h>
 #include <sys/shm.h>
 #include <string.h>
-#include "proj4.h"
-#include <math.h>
+#include "proj5.h"
+// // #include <math.h>
 
-
-
-/*getopt() flags:*/
+// /*getopt() flags:*/
 static int h_flag = 0;
-static char* fileName = "log_file.txt"; //the filename in -l filename
-static int computationShotClock = 20; //the z in -t z; is time in seconds when the master will terminate itself and all children
-/*getopt() flags:*/
-static int message_queue_id; //holds message queue id 
-static pid_t actual[MAX_USER_PROCESSES + 1]; //array of pid_t(s);
-system_clock_t newProcessCreateTime; //a clock to use as differentiator between the logical clock and the system clock of OSS
+static char* fileName = "log_file.txt"; //the filename in -l filename; declaring char* fileName character pointer as a const string affords us the priviledge of not having to end our string with a NULL terminator '\0'
+static int computationShotClock = 20; //the z in -t z; is the time in seconds when the master will terminate itself and all children
+// /*getopt() flags:*/
+static int array_pos = 1; //called in main while(1) for makeUserProcesses(array_pos)
+static int message_queue_id;
+int msgsnd_result; //holds the result of msgsnd(); 0 on success and -1 on fail()
+ssize_t msgrcv_result; //holds the result of msgrcv(); n bytes on sucess and ssize_t - 1 on fail
+int shmid; //holds the shared memory segment id - - #virtual_SHMSnametag
+shared_memory_object_t* shm_ptr; //pointer to starting address in shared memory of the shared memory structure (see proj4.h)
 
+system_clock_t newProcessCreateTime; //a clock to use as a differentiator between the logical clock that is implemented to simulate the system clock of OSS, this newProcessCreateTime clock is meant to manage a seperate time table from system time, it is meant to measure time from the perspective of the process' lifetime, not the system's lifetime
+static int terminated_processes = 0;
 
-int process_table[32]; //process table
-int process_table_reservation; //index of the process control blocks in the process table 
+//FILE* fp; //global FILE* pointer, fp, will be used to assign the address of a stream file descriptor segment in memory that controls the i/o for this write operation
+//int line_counter = 1; //this counts every line that is printed, so we can monitor our log's total line count (want to keep it at a max of 10,000 lines)
 
-int shmid; //holds the shared memory segment id 
-shared_memory_object_t* shm_ptr; //pointer to starting address in shared memory of the shared memory structure 
-FILE* fp; //global FILE* pointer
-int line_counter = 1; //counts every line printed
+static pid_t pid_array[MAX_PROCESS_NUM + 1]; //stores the pid_t of each child in a pid_t array; 1's based
+static int process_count = 0;
 
-// REFERENCED from textbook -- 3-28
-int terminated_process_count = 0; 
-double avg_turn_around_time = 0.00; //nano_seconds
-unsigned long long total_turn_around_time = 0;
-double avg_wait_time = 0.00; //average time a process in the system spends waiting for control of the CPU
-unsigned int cpu_idle_itme = 0; // computing the average wait time
-
-
-//REFERENCE 3-25
-// Define queue type
-typedef struct Node_Object node_object_t; //forward declaration 
-
-//REFERENCE3-25
-typedef struct Node_Object {
-	int process_id;
-	node_object_t* next_node;
-} node_object_t; //node for a linked-list implementation of a queue
-
-typedef struct Queue_Object {
-    node_object_t* front;
-    node_object_t* back;
-    int time_quantum;
-} queue_object_t; //this is a queue data structure for implementing a multi-level queue schedluing system
-
-static queue_object_t* multilevel_queue_system[3]; //multi-level queue ptr
-
-queue_object_t* create_a_new_queue(int time_quantum_amt) {
-    queue_object_t* new_queue = (queue_object_t*) malloc(sizeof(queue_object_t));
-
-    //malloc failed 
-    if (new_queue == NULL) {
-        return NULL;
-    }
-
-    new_queue->time_quantum = time_quantum_amt;
-    new_queue->front = NULL;
-    new_queue->back = NULL;
-
-    return new_queue;
-}
-
-int push_enqueue(queue_object_t* destinationQueue, int processID) {
-
-    //Check if the queue is a valid queue:
-    if (destinationQueue == NULL) {
-        return -1; //invalid queue
-    }
-
-    //Add a node to the queue:
-    node_object_t* new_queue_node = (node_object_t*) malloc(sizeof(node_object_t));
-    new_queue_node->process_id = processID;
-    new_queue_node->next_node = NULL;
-
-    //Empty Queue Processing:
-    if (destinationQueue->front == NULL) {
-        destinationQueue->front = new_queue_node;
-        destinationQueue->back = new_queue_node;
-    }
-    //Non-Empty Queue Processing:
-    else {
-        destinationQueue->back->next_node = new_queue_node; //pointing to node_object_t pointer 
-        destinationQueue->back = new_queue_node;
-    }
-
-    //return a 0 if push was successful:
-    return 0;
-}
-
-int pop_dequeue(queue_object_t* sourceQueue) {
-
-    //Empty Queue Processing:
-    if(sourceQueue->front == NULL){
-        return -1; //this is an empty queue
-    }
-
-    int processID = sourceQueue->front->process_id; //return the process_id value to identify which process is being popped off the queue
-    
-    //Remove Node From Queue:
-    node_object_t* temporary_node = sourceQueue->front;
-    sourceQueue->front = sourceQueue->front->next_node;
-    free(temporary_node);
-
-    return processID; 
-}
-
-
-void destroyQueue(queue_object_t* sourceQueue) {
-
-    node_object_t* current_node = sourceQueue->front;
-    node_object_t* temporary_node;
-
-    //Free nodes in Queue:
-    while (current_node != NULL) {
-        temporary_node = current_node->next_node;
-        free(current_node);
-        current_node = temporary_node;
-    }
-
-    //Free The Queue Itself:
-    free(sourceQueue);
-}
-
-int process_selection(void) {
-    int i; 
-    int selected_process;
-
-//3 = the number of queues in our multilevel queue system
-    for(i = 0; i < 3; ++i) {
-        selected_process = pop_dequeue(multilevel_queue_system[i]);
-
-        //Check If pop_dequeue(queue_array[]) Returned -1 because of an Empty/Non-Valid Queue
-        if (selected_process == -1) {
-            continue; //this queue is empty - try the next queue 
-        }
-
-        return selected_process;
-    }
-    
-    //Report Back a -1 if no processes in queues 
-    return -1;
-}
-
-
-void process_scheduler(int process_table_reservation) {
-    //Priority for user at process_table_reservation
-    int current_priority = shm_ptr->process_control_block[process_table_reservation].priority;
-
-    // CPU BOUND PROCESS:
-    if (shm_ptr->process_control_block[process_table_reservation].burst == multilevel_queue_system[shm_ptr->process_control_block[process_table_reservation].priority]->time_quantum) {
-        shm_ptr->process_control_block[process_table_reservation].priority = (current_priority + 1 >= 3) ? current_priority : ++current_priority;
-        shm_ptr->process_control_block[process_table_reservation].time_quantum = multilevel_queue_system[current_priority]->time_quantum;
-    }
-
-    // I/O Bound
-    else {
-        // Output message 
-        fprintf(fp, "%d: OSS: PROCESS_PID_%d TIME_QUANTUM NOT EXHAUSTED ~ I/O BOUND PROCESS\n", line_counter, process_table_reservation);
-        ++line_counter;
-
-        current_priority = 0;
-        shm_ptr->process_control_block[process_table_reservation].priority = current_priority;
-        shm_ptr->process_control_block[process_table_reservation].time_quantum = multilevel_queue_system[current_priority]->time_quantum;
-    }
-    //Push to right queue 
-    push_enqueue(multilevel_queue_system[current_priority], process_table_reservation);
-
-    //Output Message:
-    fprintf(fp, "%d: OSS: Putting PROCESS_PID_%d INTO QUEUE %d\n", line_counter, process_table_reservation, current_priority);
-    ++line_counter;
-}
-
-//this function controls the logical clock (controlled by oss)
+//this function controls the logical clock (controlled by oss) that is meant to represent the system clock controlled by the operating system
 void clock_incrementation_function(system_clock_t *destinationClock, system_clock_t sourceClock, int additional_nano_seconds) {
+    //changes the first parameter, the system_clock_t object* (passed by reference) value 
+    //takes the the second parameter, the system_clock_t object (the current logical clock time calculated thus far) to use as the current state (from a value of seconds and nanoseconds properties standpoint) to update that same clock with additional nanoseconds, which is the third parameter
     destinationClock->nano_seconds = sourceClock.nano_seconds + additional_nano_seconds;
     if(destinationClock->nano_seconds > 1000000000) {
         destinationClock->seconds++;
         destinationClock->nano_seconds -= 1000000000;
     }
+    //because of pass by reference this function takes care of our logical implementation of a system clock simulator without passing data heavy copies of arguments to and from our function that needs to be run many many times #memory_efficient
 }
 
 //function detaches the shared memory segment shmaddr and then removes the shared memory segment specified by shmid
@@ -203,129 +56,98 @@ int detachandremove (int shmid, void* shmaddr){
     return -1;
 }
 
-//function that spawns/generates/forks slave processes; 
-void makeUserProcesses(int process_table_position) {
-    char slave_id[3]; //char array to be used to hold a copy of the process_table_position value 
-        shm_ptr->process_control_block[process_table_position].priority = 0;
-        shm_ptr->process_control_block[process_table_position].cpu_usage_time = 0;
-        shm_ptr->process_control_block[process_table_position].burst = 0;
-        shm_ptr->process_control_block[process_table_position].time_quantum = multilevel_queue_system[shm_ptr->process_control_block[process_table_position].priority]->time_quantum;
-        shm_ptr->process_control_block[process_table_position].finished = 0;
-        shm_ptr->process_control_block[process_table_position].process_starts.seconds = shm_ptr->clock_info.seconds; //start process life-span (time in system tracker) 
-        shm_ptr->process_control_block[process_table_position].process_starts.nano_seconds = shm_ptr->clock_info.nano_seconds; //start process life-span (time in system tracker) clock at process generation time
-        shm_ptr->process_control_block[process_table_position].process_arrives.seconds = 0; //this time will get initialized when the process is returned back from the Critical Section to the Master OSS
-        shm_ptr->process_control_block[process_table_position].process_arrives.nano_seconds = 0; 
+//function that spawns/generates/forks slave/user/child processes; takes the position of the first open position in the process table and spawns a user process that is assigned that same position value in our array of pid_t(s) (array of spawned user processes)
+void makeUserProcesses(int pid_array_position) {
+    char slave_id[3]; //char array (via the sprintf below) #process_nametag
+    int i; //iterate for-loop
+    
+    //Fork (loop) ~ generate/spawn/fork a new user/slave/child process
+    for (i = 1; i < MAX_PROCESS_NUM + 1; i++) {
+        pid_array[pid_array_position] = fork();
 
-       actual[process_table_position] = fork();
-
-        if (actual[process_table_position] < 0) {
+        //slave/child/user process code - - remember that fork() returns twice!
+        if (pid_array[pid_array_position] < 0) {
             //fork failed
             perror("Fork failed");
             exit(errno);
         }
-        else if (actual[process_table_position] == 0) { //child process executing after fork
-            //slave/child/user process code - - remember that fork() returns twice!
-            sprintf(slave_id, "%d", process_table_position); 
-            execl("./user", "user", slave_id, NULL); //replaces memory copied to each process after fork 
+        //this catches the child process that is executing after fork because a child process has a self-referencing ID of 0 where as the Master process holds the child process's actual pid_t
+        else if (pid_array[pid_array_position] == 0) {
+        shm_ptr->system_processes[pid_array_position].pid_literal = pid_array[pid_array_position];
+        shm_ptr->system_processes[pid_array_position].process_num_logical = i;
+        ++process_count;
+            sprintf(slave_id, "%d", pid_array_position); 
+            execl("./user", "user", slave_id, NULL); //replaces the memory copied to each process after fork to start over with nothing
             perror("Child failed to execl slave exe");
-            printf("Error - this shouldn't display \n");
+            printf("THIS SHOULD NEVER EXECUTE\n");
         }
     }
+}
 
+//master.c signal handler for master process
 void signalCallback (int signum) {
-    int j, status; 
-
+    int i, status;
     if (signum == SIGINT)
         printf("\nSIGINT received by master\n");
     else
         printf("\nSIGALRM received by master\n");
-
-
-   for (j = 1; j <= MAX_USER_PROCESSES; j++){ 
-        kill(actual[j], SIGINT);
+   for (i = 1; i <= MAX_PROCESS_NUM + 1; i++){
+        kill(pid_array[i], SIGINT);
     }
-
-   while(wait(&status) > 0);  //wait for all of the slaves processes return exit statuses
-   
-   //Remove All Queues
-   int i;
-   for (i = 0; i < 3; ++i) {
-       destroyQueue(multilevel_queue_system[i]);
-   }
-
-   avg_wait_time = cpu_idle_itme/terminated_process_count;
-printf("\navg_wait_time = %.0f nano_seconds per process\n", avg_wait_time);
-    avg_turn_around_time = total_turn_around_time/terminated_process_count;
-printf("\navg_turn_around_time = %.0f nano_seconds per process\n", avg_turn_around_time);
-printf("\nCPU_Idle_Time = %u nano_seconds\n", cpu_idle_itme); 
-    //clean up program before exit 
+    while(waitpid(pid_array[i], &status, 0) > 0) {
+        if (WIFEXITED(status))	/* process exited normally */
+		printf("slave process exited with value %d\n", WEXITSTATUS(status));
+    }
     detachandremove(shmid,shm_ptr); //cleans up shared memory IPC
     msgctl(message_queue_id, IPC_RMID, NULL); //cleans up message queue IPC
     printf("master done\n");
-    printf("\nline count = %d\n", line_counter);
-    fclose(fp);
+//printf("\nline count = %d\n", line_counter);
+    //fclose(fp); //close the write to file method until we are ready for logging to be taken care of at the end
     exit(0);
+//check ipcs after this; if there is shared memory still there then type ipcrm -h and it will show you how to remove each type (Message Queue, Shared Mem, etc...)
 }
 
 void mail_the_message(int destination_address){
+printf("\nOSS.C: after mail() called");
     static int size_of_message;
     message_t message;
     message.message_address = destination_address;
-    //specifies the number of bytes in the message contents, not counting the address variable size
-    size_of_message = sizeof(message) - sizeof(message.message_address);
-    msgsnd(message_queue_id, &message, size_of_message, 0);  //send execution context messages
+    size_of_message = sizeof(message) - sizeof(message.message_address); //specifies the number of bytes in the message contents, not counting the address variable size
+    //if successful, msgsnd returns 0
+    //msg_result = msgsnd(message_queue_id, &message, size_of_message, 0);  //system function that is used to send execution context messages, should be called inside busy-loop before exiting OR entering a critical section; IPC tool for use between master and child/user/slave processes
+    if(msgsnd_result == msgsnd(message_queue_id, &message, size_of_message, 0) < 0) {  // - newly added - //system function that is used to send execution context messages, should be called inside busy-loop before exiting OR entering a critical section; IPC tool for use between master and child/user/slave processes < 0){
+        perror("Error: master: msgsnd()\n");
+        exit(errno);
+    }
 }
 
 void receive_the_message(int destination_address){
     static int size_of_message;
     message_t message;
     size_of_message = sizeof(message) - sizeof(long);
-    msgrcv(message_queue_id, &message, size_of_message, destination_address, 0);
+    if((msgrcv_result = msgrcv(message_queue_id, &message, size_of_message, destination_address, 0)) == (sizeof(ssize_t) - 1)) {
+     perror("Error: master: msgrcv()\n");  
+    }
 
-    int process_table_reservation = message.return_address;
+printf("\nfrom_id=%d\n", message.return_address);
+printf("\nOSS: RECEIVE() EXECUTES HERE #tracer\n");
 
-printf("\nid=%d\n", message.return_address);
-    fprintf(fp, "\n%d: ID %d received time:  %d:%d\n", line_counter, process_table_reservation, shm_ptr->clock_info.seconds, shm_ptr->clock_info.nano_seconds);
-    ++line_counter;
+clock_incrementation_function(&shm_ptr->clock_info, shm_ptr->clock_info, rand() % RANDOM_NANO_INCREMENTER + 1);
 
-    int status; //holds the exiting code for terminated process 
-    clock_incrementation_function(&shm_ptr->clock_info, shm_ptr->clock_info, shm_ptr->process_control_block[process_table_reservation].burst);
+    //clock_incrementation_function(&shm_ptr->clock_info, shm_ptr->clock_info, //?); //increment logical clock again upon message receipt from user.c
+
+    //kill the process on return from the critical section
+    int i, status; //i is for-loop iterator, status is to hold the exit signal after master invokes kill on the infinitely running slave processes
     
-    if(shm_ptr->process_control_block[process_table_reservation].finished == 1) {
-
-        shm_ptr->process_control_block[process_table_reservation].wait_time = ((shm_ptr->clock_info.seconds + shm_ptr->clock_info.nano_seconds) - (shm_ptr->process_control_block[process_table_reservation].process_starts.seconds + shm_ptr->process_control_block[process_table_reservation].process_starts.nano_seconds) - shm_ptr->process_control_block[process_table_reservation].cpu_usage_time);                     
-        cpu_idle_itme += shm_ptr->process_control_block[process_table_reservation].wait_time;
-
-        shm_ptr->process_control_block[process_table_reservation].turn_around_time = (((shm_ptr->clock_info.seconds * 1000000000) + shm_ptr->clock_info.nano_seconds) - ((shm_ptr->process_control_block[process_table_reservation].process_arrives.seconds * 1000000000) + shm_ptr->process_control_block[process_table_reservation].process_arrives.nano_seconds));
-        fprintf(fp, "\n%d: PROCESS_ID_%d's Turn_Around_Time = %d nano_seconds\n", line_counter, process_table_reservation, shm_ptr->process_control_block[process_table_reservation].turn_around_time);        
-        ++line_counter;
-        total_turn_around_time += shm_ptr->process_control_block[process_table_reservation].turn_around_time;
-        kill(actual[process_table_reservation], SIGINT);
-        ++terminated_process_count;
-        waitpid(actual[process_table_reservation], &status, 0);
-        ClearBit(process_table, process_table_reservation);
-        
-        fprintf(fp, "%d: ID%d  termination time: %d:%d\n", line_counter, process_table_reservation, shm_ptr->clock_info.seconds, shm_ptr->clock_info.nano_seconds);
-        ++line_counter;
-        fprintf(fp, "%d: ID:%d BURST = %d\n", line_counter, process_table_reservation, shm_ptr->process_control_block[process_table_reservation].burst);
-        ++line_counter;
-    }
-    else {
-        process_scheduler(process_table_reservation);                    
-    }
-
-}
-
-//search the process table
-int get_process_table_index_state(int array[]) {
-int i;
-    for (i = 1; i <= MAX_USER_PROCESSES; i++) {
-        if(!TestBit(array, i)) {
-printf("\ni = %d\n", i);
-            return i; //return index number of position
+    /*might not need any of this [FRONT BOOK END FOR CODE BLOCK IN QUESTION]*/
+    for (i = 1; i <= MAX_PROCESS_NUM + 1; i++){
+        kill(shm_ptr->system_processes[i].pid_literal, SIGTERM);
+        ++terminated_processes; //counts processes that have been killed...useful metric?
+printf("terminated_processes = %d", terminated_processes);
+        while(waitpid(shm_ptr->system_processes[i].pid_literal, &status, 0) > 0) { 
+        if (WIFEXITED(status))	/* process exited normally */
+		printf("slave process exited with value %d\n", WEXITSTATUS(status));
         }
-printf("**PROCESS_TABLE_FULL**\n");
-        return -1; //return a -1 if the process_table is full 
     }
 }
 
@@ -355,9 +177,9 @@ int main(int argc, char* argv[]) {
 
     if (h_flag == 1)
     {
-        printf("'-h' flag: help menu\n");
-        printf("'-l filename' flag: sets name of the file that slave processes will write into (default file name = %s).  Current name  is %s\n", fileName, fileName);
-        printf("'-t z' flag: determines amount time until the master process terminates itself (default value = %d). Current value of timer variable = %d\n", computationShotClock, computationShotClock );
+        printf("'-h' flag: This provides a help menu\n");
+        printf("'-l filename' flag: This sets the name of the file that the slave processes will write into (default file name = %s).  Current name  is %s\n", fileName, fileName);
+        printf("'-t z' flag: This flag determines the amount time that will pass until the master process terminates itself (default value = %d). Current value of the timer variable = %d\n", computationShotClock, computationShotClock );
         exit(0);
     }
 
@@ -375,94 +197,90 @@ int main(int argc, char* argv[]) {
     //this timer generates SIGALRM after computationShotClock seconds
     alarm(computationShotClock);
 
-    //master process creates shared memory segment
+    //master process creates and assigns shared memory segment; assigns id to shmid
     if ((shmid = shmget(SHM_KEY, sizeof(shared_memory_object_t), IPC_CREAT | 0600)) < 0) {
         perror("Error: shmget");
         exit(errno);
     }
 
-    //master process creates a message queue;
+    //master process creates a message queue; it returns a queue_id which you can use to access the message queue
     if ((message_queue_id = msgget(MESSAGE_QUEUE_KEY, IPC_CREAT | 0600)) < 0) {
         perror("Error: mssget");
         exit(errno);
     }
 
-    //shared memory segment address 
+    //attach shared memory segment address to our pointer to a shared_memory_object_t struct; we've initialized our shared memory segment
     shm_ptr = shmat(shmid, NULL, 0);
-    //master initializes shared memory
-    shm_ptr->clock_info.seconds = 0; //zero before time is kept by the simulated system fact 
-    shm_ptr->clock_info.nano_seconds = 0;  //zero before time is kept by the simulated system clock 
+
+    /* If you need more initial setup area:*/
+    //master initializes shared memory variables in shared memory structure; has to be done AFTER shmat:
+    shm_ptr->clock_info.seconds = 0; //must be declared and initialized to zero before any logical time is kept by the simulated system clock
+    shm_ptr->clock_info.nano_seconds = 0;  //must be declared and initialized to zero before any logical time is kept by the simulated system clock
+
+  //master initializes time (to zero to start) till next user process is to be generated; will start off at zero for the initial comparison and that is why we have initialized its seconds and nano-seconds systel_clock_t object attributes both to 0 here
     newProcessCreateTime.seconds = 0;
     newProcessCreateTime.nano_seconds = 0;
 
-    int golden_boy; //selected process
+//     //open up a new file to write to for our log, assign the control of this stream to the FILE* file stream manager object pointer, fp:
+//     fp = fopen(fileName, "w");
 
-    //Create the Multi-Level Queue System:
-    int k=0;
-    for (k = 0; k < 3; k++){ //3 = the number of queues in system
-        multilevel_queue_system[k] = create_a_new_queue(TIME_QUANT_QUEUE_0 * pow(2, k)); 
-    }
+     //infinite loop won't terminate without a signal (wont terminate naturally)
+    //while(1) { //may need to change this to a conditional set forth by the project 5 requirements
 
-    // Initialize Process Table:
-    int j = 0; 
-    for (j = 0; j <= 32; j++) {
-        process_table[j] = 0; //32 bits in process table
-    }
-
-    //open  new file to write for log
-    fp = fopen(fileName, "w");
-
-    //infinite loop won't terminate without signal
-    while(1) {
-
-        if(line_counter > LINE_MAX) {
-            fclose(fp);
-        }
-        
-        //increment clock 
-        clock_incrementation_function(&shm_ptr->clock_info, shm_ptr->clock_info, rand() % CONTEXT_SWITCH_TIME + 1);
+//         if(line_counter > LINE_MAX) {
+//             fclose(fp);
+//         }
+    sleep(1);
+        //increment the clock in oss by a random amount of time between [1,500,000,000 nanos] 
+        clock_incrementation_function(&shm_ptr->clock_info, shm_ptr->clock_info, rand() % RANDOM_NANO_INCREMENTER + 1);
+printf("OSS: clock_incrementer() = %d:%d", shm_ptr->clock_info.seconds, shm_ptr->clock_info.seconds);
+        //if elapsed (simulated) system (logical clock) time has eclipsed the amount of time necessary to wait until next user process is generated/spawned (newProcessCreateTime) then try to spawn a user new process
         if ((shm_ptr->clock_info.seconds > newProcessCreateTime.seconds) || 
         (shm_ptr->clock_info.seconds == newProcessCreateTime.seconds && shm_ptr->clock_info.nano_seconds > newProcessCreateTime.nano_seconds)) {
 
-                //return proces_table_reservation, from get_process_table_index_state
-                process_table_reservation = get_process_table_index_state(process_table);
-                printf("\nprocess_table_reservation = %d\n", process_table_reservation);
+printf("\nsystem clock > newClock");
 
-                //call user process generation function 
-            if (process_table_reservation != -1) {
-                makeUserProcesses(process_table_reservation);
-                
-            //put user process in process_table
-            fprintf(fp, "%d: ID%d in process table in position: %d\n", line_counter, actual[process_table_reservation], process_table_reservation); //prints the pid of the child 
-            ++line_counter;
-            SetBit(process_table, process_table_reservation); //place a logical process in bit-vector from process_table simulation
-
-            //place new process in queue based on priority
-            push_enqueue(multilevel_queue_system[shm_ptr->process_control_block[process_table_reservation].priority], process_table_reservation);
-            clock_incrementation_function(&newProcessCreateTime, shm_ptr->clock_info, rand() % 2000000000);
-
-            //log message 
-            fprintf(fp, "%d: ID%d generated; time: %d:%d\n", line_counter, process_table_reservation, shm_ptr->clock_info.seconds, shm_ptr->clock_info.nano_seconds);
-            ++line_counter;
+            //temporary conditional: do not call makeUserProcesses(int array_pos) if there are more processes than allowed in the system currently
+            if (process_count <= MAX_PROCESS_NUM) { //should MAX_PROCESS_NUM have a + 1 after it?  not sure right now come back to this later
+printf("\nINprocess_count <= MAX_PROCESS_NUM");
+                makeUserProcesses(array_pos);
             }
-        }
-        golden_boy = process_selection(); //returns the process id of process exiting the queue 
-        
-        if(golden_boy != -1){
-    
-            mail_the_message(golden_boy); //master sends the id of the process currently scheduled 
-            fprintf(fp, "%d: OSS: ID%d  placed into queue: %d System_clock_t: %d:%d \n", line_counter, golden_boy, shm_ptr->process_control_block[process_table_reservation].priority, shm_ptr->clock_info.seconds, shm_ptr->clock_info.nano_seconds);
-            ++line_counter;
+printf("\nJUSTOUTprocess_count <= MAX_PROCESS_NUM");
+            //Determine next time to generate a process...after a random amount of time between [1 and 500million nano-seconds] has passed
+            //this works because we are adding a random amount of time to another copy of the logical clock (system clock simulator) with all of the same information as the current state of that clock except for that it will be given a potentially much larger (between 1 and 500 million nanoseconds) amount of additional time, as the loop continues to loop the next process won't be able to be generated (because of an if-conditional) that won't allow the code to advance until enough extra context switch time has been incremented to our original logical clock that it has a greater value than the new copy of that logical clock meaning that the amount of time on average that should pass before oss generates a new process has passed and a new process should be generated...at that point the if-conditional will be satisfied and a new process will be generated'
+            clock_incrementation_function(&newProcessCreateTime, shm_ptr->clock_info, rand() % RANDOM_FORK_TIME_BOUND + 1);
+printf("\nCLOCK JUST INCREMENTED RANDOMLY");
 
-            //return address to master 
-            receive_the_message(MASTER_PROCESS_ADDRESS);
-                shm_ptr->process_control_block[process_table_reservation].process_arrives.seconds = shm_ptr->clock_info.seconds;
-                shm_ptr->process_control_block[process_table_reservation].process_arrives.nano_seconds = shm_ptr->clock_info.nano_seconds;
-            }
+
+    int i;
+    for (i = 1; i <= MAX_PROCESS_NUM + 1; i++) {
+        //if (shm_ptr->system_processes[i].process_num_logical > 0 && shm_ptr->system_processes[i].process_num_logical <= MAX_PROCESS_NUM) {
+            sleep(1);
+            //USER: update the clock in the user.c critical section
+            //after obtaining access to the message queue with msgget, a program inserts messages into the message queue with msgsnd(...) (which is in the mail_the_message ud-type)
+            mail_the_message(shm_ptr->system_processes[i].process_num_logical); //master/OSS sends the logical id of the process that is currently allowed into the crtical section 
+printf("\nOSS.C: after mail() called");
+            //OSS: update the clock in the oss.c receive()
+            receive_the_message(400); //user/child/slave process has given up the critical section back to the OS (oss.c)
+printf("\nOSS.C: after receive() called");
+            sleep(1);     
         }
 
-    //no cleanup -  signal handler 
+
+        }
+
+    //} while loop
+
+    printf("OSS.c is done running...\n");
+    //Cleanup
+    detachandremove(shmid,shm_ptr); 
+    msgctl(message_queue_id, IPC_RMID, NULL);
+    free(pid_array);
+    /**might not need any of this [FRONT BOOK END FOR CODE BLOCK IN QUESTION]*/
+     
+
     return 0; 
+
 }
 
 
